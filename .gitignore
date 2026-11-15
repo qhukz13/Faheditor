@@ -1,0 +1,9 @@
+# Build output
+fah
+*.o
+
+# Editor / OS files
+*.swp
+*~
+.DS_Store
+Thumbs.db
