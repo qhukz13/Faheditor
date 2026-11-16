@@ -391,12 +391,15 @@ void editorSelectSyntaxHighlight() {
 int editorRowCxToRx(erow *row, int cx) {
     int rx = 0;
     int j;
-    for(j = 0; j < cx; j++){
-        if(row->chars[j] == '\t'){
-            rx += (FAH_TAB_STOP - 1) - (rx % FAH_TAB_STOP);
-        rx++;
+
+    for (j = 0; j < cx; j++) {
+        if (row->chars[j] == '\t') {
+            rx += (FAH_TAB_STOP - 1) -
+                  (rx % FAH_TAB_STOP);
         }
+        rx++;
     }
+
     return rx;
 }
 
@@ -721,8 +724,6 @@ void editorScroll() {
     if (E.cy < E.numrows){
         E.rx = editorRowCxToRx(&E.row[E.cy], E.cx);
     }
-
-    E.rx = E.cx;
 
     if (E.cy < E.rowoff) {
         E.rowoff = E.cy;
