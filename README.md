@@ -11,18 +11,26 @@ A small terminal text editor written in C, built by following the
 - Syntax highlighting for C/C++ (`.c`, `.h`, `.cpp`): keywords, types, strings, numbers and comments
 - Status bar with filename, line count, modified flag and file type
 
-## Build
+## Build & Install
 
-Requires a C compiler and `make` on a POSIX system (Linux, macOS, WSL):
+Requires `gcc` (or a compatible C99 compiler) and `make` on a POSIX system (Linux, macOS, WSL):
 
 ```sh
-make
+make                  # build ./qzeditor
+make install          # install to /usr/local/bin/qzeditor (uses sudo)
+make clean            # remove built binary
+```
+
+You can override variables such as `CC` or `PREFIX` (default `/usr/local/bin`):
+
+```sh
+make PREFIX=$HOME/.local/bin install
 ```
 
 ## Usage
 
 ```sh
-./qzeditor            # start with an empty buffer
+./qzeditor            # start with an empty buffer (or `qzeditor` if installed)
 ./qzeditor file.c     # open a file
 ```
 
