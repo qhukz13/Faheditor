@@ -1,5 +1,6 @@
 # Build output
-fah
+qzeditor
+qz
 *.o
 
 # Editor / OS files

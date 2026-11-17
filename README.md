@@ -1,4 +1,4 @@
-# Faheditor
+# QZeditor
 
 A small terminal text editor written in C, built by following the
 [Kilo tutorial](https://viewsourcecode.org/snaptoken/kilo/) ("Build Your Own Text Editor").
@@ -22,8 +22,8 @@ make
 ## Usage
 
 ```sh
-./fah            # start with an empty buffer
-./fah file.c     # open a file
+./qzeditor            # start with an empty buffer
+./qzeditor file.c     # open a file
 ```
 
 ## Keybindings
