@@ -1,10 +1,16 @@
 # Build output
 qzeditor
+qzeditor-debug
 qz
 *.o
+*.dSYM/
+core
+core.*
+vgcore.*
 
 # Editor / OS files
 *.swp
+*.swo
 *~
 .DS_Store
 Thumbs.db
