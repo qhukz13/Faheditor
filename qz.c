@@ -32,6 +32,15 @@
 #define QZ_LINE_NUMBERS 1
 #endif
 
+#ifndef QZ_SOFT_TABS
+#define QZ_SOFT_TABS 1
+#endif
+#define QZ_INDENT_WIDTH 4
+
+#ifndef QZ_AUTO_INDENT
+#define QZ_AUTO_INDENT 1
+#endif
+
 #define CTRL_KEY(k) ((k) & 0x1f)
 
 enum editorKey {
@@ -48,7 +57,8 @@ enum editorKey {
   CTRL_ARROW_LEFT,
   CTRL_ARROW_RIGHT,
   CTRL_HOME,
-  CTRL_END
+  CTRL_END,
+  SHIFT_TAB
 };
 
 enum editorHighlight {
@@ -223,6 +233,7 @@ int editorReadKey() {
           case 'D': key = ARROW_LEFT; break;
           case 'H': key = HOME_KEY; break;
           case 'F': key = END_KEY; break;
+          case 'Z': key = SHIFT_TAB; break;
         }
       }
 
@@ -307,7 +318,7 @@ int is_separator(int c) {
 }
 
 void editorUpdateSyntax(erow *row) {
-  row->hl = realloc(row->hl, row->rsize);
+  row->hl = realloc(row->hl, row->rsize + 1);
   memset(row->hl, HL_NORMAL, row->rsize);
 
   if (E.syntax == NULL) return;
@@ -593,6 +604,13 @@ int editorRowRxToCx(erow *row, int rx) {
     return cx;
 }
 
+int editorRowIndent(erow *row) {
+    int n = 0;
+    while (n < row->size && (row->chars[n] == ' ' || row->chars[n] == '\t'))
+        n++;
+    return n;
+}
+
 void editorUpdateRow(erow *row){
     int tabs = 0;
     int j;
@@ -710,19 +728,50 @@ void editorInsertChar(int c) {
     E.cx++;
 }
 
+void editorInsertTab() {
+    if (!QZ_SOFT_TABS) {
+        editorInsertChar('\t');
+        return;
+    }
+    int rx = (E.cy < E.numrows) ? editorRowCxToRx(&E.row[E.cy], E.cx) : 0;
+    int spaces = QZ_INDENT_WIDTH - rx % QZ_INDENT_WIDTH;
+    while (spaces-- > 0)
+        editorInsertChar(' ');
+}
+
+void editorUnindentLine() {
+    if (E.cy >= E.numrows) return;
+    erow *row = &E.row[E.cy];
+    int spaces = 0;
+    while (spaces < row->size && row->chars[spaces] == ' ') spaces++;
+
+    int n;
+    if (spaces > 0) n = spaces - (spaces - 1) / QZ_INDENT_WIDTH * QZ_INDENT_WIDTH;
+    else if (row->size > 0 && row->chars[0] == '\t') n = 1;
+    else return;
+
+    editorRowDelChars(row, 0, n);
+    E.cx = (E.cx > n) ? E.cx - n : 0;
+}
+
 void editorInsertNewLine() {
-    if (E.cx == 0) {
+    int indent = 0;
+    if (QZ_AUTO_INDENT && E.cy < E.numrows) indent = editorRowIndent(&E.row[E.cy]);
+    if (E.cx <= indent) {
         editorInsertRow(E.cy, "", 0);
+        indent = E.cx;
     } else {
         erow *row = &E.row[E.cy];
-        editorInsertRow(E.cy + 1, &row->chars[E.cx], row->size - E.cx);
-        row = &E.row[E.cy];
-        row->size = E.cx;
-        row->chars[row->size] = '\0';
-        editorUpdateRow(row);
+        int restlen = row->size - E.cx;
+        char *line = malloc(indent + restlen + 1);
+        memcpy(line, row->chars, indent);
+        memcpy(&line[indent], &row->chars[E.cx], restlen);
+        editorInsertRow(E.cy + 1, line, indent + restlen);
+        free(line);
+        editorRowDelChars(&E.row[E.cy], E.cx, restlen);
     }
     E.cy++;
-    E.cx = 0;
+    E.cx = indent;
 }
 
 void editorDelChar() {
@@ -740,6 +789,25 @@ void editorDelChar() {
         editorDelRow(E.cy);
         E.cy--;
     }
+}
+
+void editorBackspace() {
+    if (QZ_SOFT_TABS && E.cy < E.numrows && E.cx > 0) {
+        erow *row = &E.row[E.cy];
+        if (E.cx <= editorRowIndent(row)) {
+            int rx = editorRowCxToRx(row, E.cx);
+            int stop = (rx - 1) / QZ_INDENT_WIDTH * QZ_INDENT_WIDTH;
+            int n = 0;
+            while (n < E.cx && n < rx - stop && row->chars[E.cx - 1 - n] == ' ')
+                n++;
+            if (n > 0) {
+                editorRowDelChars(row, E.cx -n, n);
+                E.cx -= n;
+                return;
+            }
+        }
+    }
+    editorDelChar();
 }
 
 /*** file i/o ***/
@@ -1356,13 +1424,17 @@ void editorProcessKeypress() {
             editorSave();
             break;
 
+        case '\t':
+            editorInsertTab();
+            break;
+
+        case SHIFT_TAB:
+            editorUnindentLine();
+            break;
+
         case HOME_KEY:
             if (E.cy < E.numrows) {
-                erow *row = &E.row[E.cy];
-                int indent = 0;
-                while (indent < row->size &&
-                    (row->chars[indent] == ' ' || row->chars[indent] == '\t'))
-                    indent++;
+                int indent = editorRowIndent(&E.row[E.cy]);
                 E.cx = (E.cx == indent) ? 0 : indent;
             }
             break;
@@ -1396,8 +1468,12 @@ void editorProcessKeypress() {
         case BACKSPACE:
         case CTRL_KEY('h'):
         case DEL_KEY:
-            if (c == DEL_KEY) editorMoveCursor(ARROW_RIGHT);
-            editorDelChar();
+            if (c == DEL_KEY) {
+                editorMoveCursor(ARROW_RIGHT);
+                editorDelChar();
+            } else {
+                editorBackspace();
+            }
             break;
         case PAGE_UP:
         case PAGE_DOWN:
