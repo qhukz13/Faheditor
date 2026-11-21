@@ -41,6 +41,10 @@
 #define QZ_AUTO_INDENT 1
 #endif
 
+#ifndef QZ_UNDO_LIMIT
+#define QZ_UNDO_LIMIT 100000
+#endif
+
 #define CTRL_KEY(k) ((k) & 0x1f)
 
 enum editorKey {
@@ -97,6 +101,35 @@ typedef struct erow {
     int hl_open_comment;
 } erow;
 
+enum undoType {
+    UNDO_INSERT_TEXT,
+    UNDO_DELETE_TEXT,
+    UNDO_INSERT_ROW,
+    UNDO_DELETE_ROW
+};
+
+typedef struct undoRecord {
+    int type;
+    int y, x;
+    char *text;
+    int len;
+    int group;
+    int cx, cy;
+    int ax, ay;
+} undoRecord;
+
+struct undoLog {
+    undoRecord *rec;
+    int len;
+    int cap;
+    int pos;
+    int paused;
+    int group;
+    int depth;
+    int cx, cy;
+    int saved;
+};
+
 struct editorConfig {
     int cx, cy;
     int rx;
@@ -109,7 +142,7 @@ struct editorConfig {
     int textcols;
     int numrows;
     erow *row;
-    int dirty;
+    struct undoLog undo;
     char *filename;
     struct timespec mtime;
     char statusmsg[80];
@@ -150,6 +183,7 @@ void editorSetStatusMessage(const char *fmt, ...);
 void editorRefreshScreen();
 void editorUpdateWindowSize();
 char *editorPrompt(char *prompt, void (*callback)(char *, int));
+void editorUndoPush(int type, int y, int x, const char *text, int len);
 
 /*** terminal ***/
 
@@ -644,6 +678,7 @@ void editorUpdateRow(erow *row){
 
 void editorInsertRow(int at, char *s, size_t len) {
     if (at < 0 || at > E.numrows) return;
+    editorUndoPush(UNDO_INSERT_ROW, at, 0, s, len);
 
     E.row = realloc(E.row, sizeof(erow) * (E.numrows + 1));
     memmove(&E.row[at + 1], &E.row[at], sizeof(erow) * (E.numrows - at));
@@ -663,7 +698,6 @@ void editorInsertRow(int at, char *s, size_t len) {
     editorUpdateRow(&E.row[at]);
 
     E.numrows++;
-    E.dirty++;
 }
 
 void editorFreeRow(erow *row) {
@@ -674,38 +708,160 @@ void editorFreeRow(erow *row) {
 
 void editorDelRow(int at) {
     if (at < 0 || at >= E.numrows) return;
+    editorUndoPush(UNDO_DELETE_ROW, at, 0, E.row[at].chars, E.row[at].size);
     editorFreeRow(&E.row[at]);
     memmove(&E.row[at], &E.row[at + 1], sizeof(erow) * (E.numrows - at - 1));
     for (int j = at; j < E.numrows - 1; j++) E.row[j].idx--;
     E.numrows--;
-    E.dirty++;
+}
+
+void editorRowInsertString(erow *row, int at, const char *s, int len) {
+    if (at < 0 || at > row->size) at = row->size;
+    editorUndoPush(UNDO_INSERT_TEXT, row->idx, at, s, len);
+    row->chars = realloc(row->chars, row->size + len + 1);
+    memmove(&row->chars[at + len], &row->chars[at], row->size - at + 1);
+    memcpy(&row->chars[at], s, len);
+    row->size += len;
+    editorUpdateRow(row);
 }
 
 void editorRowInsertChar(erow *row, int at, int c) {
-    if (at < 0 || at > row->size) at = row->size;
-    row->chars = realloc(row->chars, row->size + 2);
-    memmove(&row->chars[at + 1], &row->chars[at], row->size - at + 1);
-    row->size++;
-    row->chars[at] = c;
-    editorUpdateRow(row);
-    E.dirty++;
+    char ch = c;
+    editorRowInsertString(row, at, &ch, 1);
 }
 
 void editorRowAppendString(erow *row, char *s, size_t len) {
-    row->chars = realloc(row->chars, row->size + len + 1);
-    memcpy(&row->chars[row->size], s, len);
-    row->size += len;
-    row->chars[row->size] = '\0';
-    editorUpdateRow(row);
-    E.dirty++;
+    editorRowInsertString(row, row->size, s, len);
 }
 
 void editorRowDelChars(erow *row, int at, int len) {
     if (at < 0 || len < 1 || at + len > row->size) return;
+    editorUndoPush(UNDO_DELETE_TEXT, row->idx, at, &row->chars[at], len);
     memmove(&row->chars[at], &row->chars[at + len], row->size - at - len + 1);
     row->size -= len;
     editorUpdateRow(row);
-    E.dirty++;
+}
+
+/*** undo ***/
+
+void editorUndoPush(int type, int y, int x, const char * text, int len) {
+    struct undoLog *u = &E.undo;
+    if (u->paused) return;
+
+    while (u->len > u->pos) {
+        u->len--;
+        free(u->rec[u->len].text);
+    }
+    if (u->saved > u->pos) u->saved = -1;
+
+    if (u->len >= QZ_UNDO_LIMIT && u->rec[0].group != u->group) {
+        int group = u->rec[0].group;
+        int n = 0;
+        while (n < u->len && u->rec[n].group == group) {
+            free(u->rec[n].text);
+            n++;
+        }
+        memmove(u->rec, &u->rec[n], sizeof(undoRecord) * (u->len - n));
+        u->len -= n;
+        u->pos -= n;
+        u->saved = (u->saved >= n) ? u->saved - n : -1;
+    }
+
+    if (u->len == u->cap) {
+        u->cap = (u->cap == 0) ? 16 : u->cap * 2;
+        u->rec = realloc(u->rec, sizeof(undoRecord) * u->cap);
+    }
+
+    undoRecord *r = &u->rec[u->len];
+    r->type = type;
+    r->y = y;
+    r->x = x;
+    r->text = malloc(len + 1);
+    memcpy(r->text, text, len);
+    r->len = len;
+    r->group = u->group;
+    r->cx = r->ax = u->cx;
+    r->cy = r->ay = u->cy;
+    u->len++;
+    u->pos = u->len;
+}
+
+int editorIsDirty() {
+    return E.undo.pos != E.undo.saved;
+}
+
+void editorUndoBreak() {
+    struct undoLog *u = &E.undo;
+    if (u->depth > 0) return;
+
+    if(u->pos > 0 && u->rec[u->pos - 1].group == u->group) {
+        u->rec[u->pos - 1].ax = E.cx;
+        u->rec[u->pos - 1].ay = E.cy;
+    }
+    u->group++;
+    u->cx = E.cx;
+    u->cy = E.cy;
+}
+
+void editorUndoBeginGroup() {
+    editorUndoBreak();
+    E.undo.depth++;
+}
+
+void editorUndoEndGroup() {
+    E.undo.depth--;
+    editorUndoBreak();
+}
+
+void editorUndoApply(undoRecord *r, int undo){
+    int insert = (r->type == UNDO_INSERT_TEXT || r->type == UNDO_INSERT_ROW);
+    if (undo) insert = !insert;
+
+    E.undo.paused++;
+    if (r->type == UNDO_INSERT_ROW || r->type == UNDO_DELETE_ROW) {
+        if (insert) editorInsertRow(r->y, r->text, r->len);
+        else editorDelRow(r->y);
+    } else {
+        if (insert) editorRowInsertString(&E.row[r->y], r->x, r->text, r->len);
+        else editorRowDelChars(&E.row[r->y], r->x, r->len);
+    }
+    E.undo.paused--;
+}
+
+void editorUndo() {
+    struct undoLog *u = &E.undo;
+    if (u->pos == 0) {
+        editorSetStatusMessage("Nothing to undo");
+        return;
+    }
+    int group = u->rec[u->pos - 1].group;
+    undoRecord *r;
+    do {
+        u->pos--;
+        r = &u->rec[u->pos];
+        editorUndoApply(r, 1);
+    } while (u->pos > 0 && u->rec[u->pos - 1].group == group);
+    E.cx = r->cx;
+    E.cy = r->cy;
+    editorSetStatusMessage("Undo");
+}
+
+void editorRedo() {
+    struct undoLog *u = &E.undo;
+    if (u->pos == u->len) {
+        editorSetStatusMessage("Nothing to redo");
+        return;
+    }
+    int group = u->rec[u->pos].group;
+    undoRecord *r;
+    do {
+        r = &u->rec[u->pos];
+        editorUndoApply(r, 0);
+        u->pos++;
+    } while (u->pos < u->len && u->rec[u->pos].group == group);
+    E.cx = r->ax;
+    E.cy = r->ay;
+    editorSetStatusMessage("Redo");
 }
 
 /*** editor operations ***/
@@ -892,6 +1048,7 @@ void editorOpen(char *filename){
     char *line = NULL;
     size_t linecap = 0;
     ssize_t linelen;
+    E.undo.paused++;
     while ((linelen = getline(&line, &linecap, fp)) != -1) {
         while(linelen > 0 && (line[linelen - 1] == '\n' ||
                              line[linelen - 1] == '\r')) {
@@ -899,9 +1056,9 @@ void editorOpen(char *filename){
         }
         editorInsertRow(E.numrows, line, linelen);
     }
+    E.undo.paused--;
     free(line);
     fclose(fp);
-    E.dirty = 0;
     editorRememberMtime();
 }
 
@@ -961,7 +1118,7 @@ void editorSave() {
     free(target);
     free(tmpname);
     free(buf);
-    E.dirty = 0;
+    E.undo.saved = E.undo.pos;
     editorRememberMtime();
     editorSetStatusMessage("%d bytes written to disk", len);
     return;
@@ -1201,7 +1358,7 @@ void editorDrawStatusBar(struct abuf *ab) {
     char status[80], rstatus[80];
     char *name = E.filename ? E.filename : "[No Name]";
     int namelen = editorStrFit(name, strlen(name), 20);
-    int len = snprintf(status, sizeof(status), "%.*s - %d lines %s", namelen, name, E.numrows, E.dirty ? "(modified)" : "");
+    int len = snprintf(status, sizeof(status), "%.*s - %d lines %s", namelen, name, E.numrows, editorIsDirty() ? "(modified)" : "");
     int rlen = snprintf(rstatus, sizeof(rstatus), "%s | %d/%d", E.syntax ? E.syntax->filetype : "no ft", E.cy + 1, E.numrows);
 
     if (len >= (int)sizeof(status)) len = sizeof(status) - 1;
@@ -1400,7 +1557,13 @@ void editorGoToLine() {
 
 void editorProcessKeypress() {
     static int quit_times = QZ_QUIT_TIMES;
+    static int last_typed = 0;
     int c = editorReadKey();
+
+    int typed = (c < 256 && (c >= 128 || !iscntrl(c))) ? c : 0;
+    if (!typed || !last_typed || (typed == ' ' && last_typed != ' '))
+        editorUndoBreak();
+    last_typed = typed;
 
     switch (c){
         case '\r':
@@ -1408,7 +1571,7 @@ void editorProcessKeypress() {
             break;
 
         case CTRL_KEY('q'):
-            if (E.dirty && quit_times > 0) {
+            if (editorIsDirty() && quit_times > 0) {
                 editorSetStatusMessage("WARNING!!! File has unsaved changes. "
                     "Press Ctrl-Q %d more times to quit.", quit_times);
                 quit_times--;
@@ -1455,6 +1618,14 @@ void editorProcessKeypress() {
                 E.cy = E.numrows - 1;
                 E.cx = E.row[E.cy].size;
             }
+            break;
+
+        case CTRL_KEY('z'):
+            editorUndo();
+            break;
+
+        case CTRL_KEY('y'):
+            editorRedo();
             break;
 
         case CTRL_KEY('f'):
@@ -1533,7 +1704,16 @@ void initEditor() {
     E.textcols = 0;
     E.numrows = 0;
     E.row = NULL;
-    E.dirty = 0;
+    E.undo.rec = NULL;
+    E.undo.len = 0;
+    E.undo.cap = 0;
+    E.undo.pos = 0;
+    E.undo.paused = 0;
+    E.undo.group = 0;
+    E.undo.depth = 0;
+    E.undo.cx = 0;
+    E.undo.cy = 0;
+    E.undo.saved = 0;
     E.filename = NULL;
     E.mtime.tv_sec = 0;
     E.mtime.tv_nsec = 0;
@@ -1553,7 +1733,7 @@ int main(int argc, char *argv[]) {
         editorOpen(argv[1]);
     }
 
-    editorSetStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find | Ctrl-G = go to line");
+    editorSetStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find | Ctrl-Z/Y = undo/redo |Ctrl-G = go to line");
 
     while(1) {
         editorRefreshScreen();
